@@ -6,6 +6,10 @@ This tool is helpful in scenarios where you got AWS credentials (`AWS_ACCESS_KEY
 
 ## Usage
 
+- **aws_enum_services.py**: This option allows the script to utilize default AWS credentials stored in the credentials file.
+- **aws_enum_services.py --profile**: Users can specify a profile option from the AWS credentials file to be used by the script.
+- **aws_enum_services.py --access-key ACCESS_KEY --secret-key SECRET_KEY --session-token SESSION_TOKEN**: With this option, users can manually input their AWS access key, secret key, and session token for authentication.
+
 ~~~
 usage: aws_enum_services.py [-h] [--access-key ACCESS_KEY] [--secret-key SECRET_KEY] [--session-token SESSION_TOKEN]
                             [--list-services]

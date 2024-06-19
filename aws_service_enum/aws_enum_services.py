@@ -5,15 +5,32 @@ import crayons, warnings, concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from prettytable import PrettyTable
 
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-choices = ['ec2','s3','rds','lambda','cloudfront','dynamodb','iam','sns','sqs','ecr','elasticbeanstalk','route53','cloudwatch','codepipeline','sagemaker','secretsmanager','glue','stepfunctions','eks','cloudtrail','kinesis','redshift','elasticache',
-'apigateway','cloudformation','appsync','ssm','elastictranscoder','datapipeline','mediaconvert','storagegateway','workspaces','cloud9','lex-models','iot','medialive','datasync','emr','athena','pinpoint','efs','mediapackage','mq','organizations','detective','opsworks','codecommit','appmesh','backup','mediapackage-vod','mediastore']
+choices = ['ec2','s3','rds','lambda','cloudfront','dynamodb','iam','sns','sqs','ecr','elasticbeanstalk','route53','cloudwatch','codepipeline','sagemaker','secretsmanager','glue','stepfunctions','eks','cloudtrail','kinesis','redshift','elasticache', 'ecs',
+'apigateway','cloudformation','appsync','ssm','elastictranscoder','datapipeline','mediaconvert','storagegateway','workspaces','cloud9','lex-models','iot','medialive','datasync','emr','athena','pinpoint','efs','mediapackage','mq','organizations','detective','opsworks','codecommit','appmesh','backup','mediapackage-vod','mediastore', 'serverlessrepo']
+
+
+access_key_profile = None
+secret_key_profile = None
+session_token_profile = None
+
+session = boto3.Session()
+credentials = session.get_credentials()
+
+if credentials:
+    access_key_profile = credentials.access_key
+    secret_key_profile = credentials.secret_key
+    session_token_profile = credentials.token
+else:
+    print("Error: Configure the credentials manually or use profile. For more information, check help.")
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--access-key', help='Provide Access key', required=False)
-parser.add_argument('--secret-key', help='Provide Secrect Key', required=False)
-parser.add_argument('--session-token', help='Provide session token if available', required=False)
+parser.add_argument('--access-key', help='Provide Access key', default=access_key_profile, required=False)
+parser.add_argument('--secret-key', help='Provide Secrect Key', default=secret_key_profile, required=False)
+parser.add_argument('--session-token', help='Provide session token if available', default=session_token_profile, required=False)
+parser.add_argument('--profile', help='AWS profile name to use for credentials', required=False)
 parser.add_argument('--list-services', help='Provide list of services', required=False,  action='store_true')
 parser.add_argument('--services', help='Services that need to be enumerated', nargs='+', required=False, choices=choices)
 parser.add_argument('--region', help='Provide regions, eg --region us-east-1, eu-north-1', required=False, nargs='+')
@@ -37,7 +54,7 @@ if args.list_services:
     'apigateway', 'cloudformation', 'appsync', 'ssm', 'elastictranscoder', 'datapipeline',
     'mediaconvert', 'storagegateway', 'workspaces', 'cloud9', 'lex-models', 'iot', 'medialive',
     'datasync', 'emr', 'athena', 'pinpoint', 'efs', 'mediapackage', 'mq', 'organizations',
-    'detective', 'opsworks', 'codecommit', 'appmesh', 'backup', 'mediapackage-vod', 'mediastore'
+    'detective', 'opsworks', 'codecommit', 'appmesh', 'backup', 'mediapackage-vod', 'mediastore', 'serverlessrepo'
     ]
     
     table = PrettyTable()
@@ -49,12 +66,21 @@ if args.list_services:
 
     print(table)    
     exit()
+if args.profile:
+    session = boto3.Session(profile_name=args.profile)
+    credentials = session.get_credentials()
+    access_key = credentials.access_key
+    secret_key = credentials.secret_key
+    session_token = credentials.token
+else:
+    access_key = args.access_key
+    secret_key = args.secret_key
+    session_token = args.session_token
 
 
-
-access_key = args.access_key
-secret_key = args.secret_key
-session_token = args.session_token
+#access_key = args.access_key
+#secret_key = args.secret_key
+#session_token = args.session_token
 
 
 if args.region == None:
@@ -197,25 +223,33 @@ def describe_rds_instances():
 def list_lambda_functions():
     started = "List Lambda functions:"
     function_data = []
-    
-    lambda_client = get_client('lambda',region_name=None)
-    response = lambda_client.list_functions()   
 
-    functions = response['Functions']
-    
-    for function in functions:
-        function_data.append([
-            function['FunctionName'],
-            function['Runtime'],
-            function['LastModified']
-        ])
+    def describe_lambda_functions(region):
+        lambda_client = get_client('lambda', region_name=region)
+        response = lambda_client.list_functions()
+        functions = response['Functions']
+        for function in functions:
+            function_data.append([
+                function['FunctionName'],
+                function['Runtime'],
+                function['LastModified']
+            ])
+
+    processes = []
+    ec2_client = boto3.client('ec2')
+    regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
+    with ThreadPoolExecutor(max_workers=Thread_Count) as executor:
+        for region in regions:
+            processes.append(executor.submit(describe_lambda_functions, region))
 
     json_body["lambda"] = function_data
-    
-    if function_data == []:
+
+    if not function_data:
         print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
         return
-    print(crayons.green("[+] " + started, bold=True), "\r\n" ,tabulate(function_data, headers=['Function Name', 'Runtime', 'Last Modified'], tablefmt='psql'))
+    print(crayons.green("[+] " + started, bold=True), "\r\n",
+          tabulate(function_data, headers=['Function Name', 'Runtime', 'Last Modified'], tablefmt='psql'))
+
 
 def list_cloudfront_distributions():
     started = "List CloudFront distributions:"
@@ -279,14 +313,19 @@ def list_iam_users():
     user_data = []
     iam_client = get_client('iam')
     response = iam_client.list_users()
-
+    groups = iam_client.list_groups()
     users = response['Users']
     
     for user in users:
+        policies = []
+        attached_policies = iam_client.list_attached_user_policies(UserName=user['UserName'])
+        for policy in attached_policies['AttachedPolicies']:
+            policies.append(policy['PolicyName'])
         user_data.append([
             user['UserName'],
             user['UserId'],
-            user['Arn']
+            user['Arn'],
+            policies  # Attach policies here
         ])
 
     json_body["iam"] = user_data
@@ -294,7 +333,80 @@ def list_iam_users():
     if user_data == []:
         print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
         return
-    print(crayons.green("[+] " + started, bold=True), "\r\n" ,tabulate(user_data, headers=['Username', 'User ID', 'ARN', 'Region'], tablefmt='psql'))
+    print(crayons.green("[+] " + started, bold=True), "\r\n" ,tabulate(user_data, headers=['Username', 'User ID', 'ARN', 'Attached Policies'], tablefmt='psql'))
+
+
+def list_iam_users_group():
+    started = "List Group Name and Attached Policies:"
+    iam_client = get_client('iam')
+    response = iam_client.list_users()
+    groups = iam_client.list_groups()
+    roles = iam_client.list_roles()['Roles']
+    user_data = []
+
+    policy_roles = {}
+    for role in roles:
+        attached_policies = iam_client.list_attached_role_policies(RoleName=role['RoleName'])
+        for policy in attached_policies['AttachedPolicies']:
+            policy_roles[policy['PolicyArn']] = role['RoleName']
+
+    for group in groups['Groups']:
+        attached_policies = iam_client.list_attached_group_policies(GroupName=group['GroupName'])
+        for policy in attached_policies['AttachedPolicies']:
+            user_data.append([group['GroupName'], policy['PolicyName']])
+
+    json_body["iam"] = user_data
+
+    if not user_data:
+        print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
+        return
+    
+    print(crayons.green("[+] " + started, bold=True))
+    print(tabulate(user_data, headers=['Group Name', 'Attached Policies'], tablefmt='psql'))
+
+
+def list_iam_users_roles():
+    started = "List Roles and Attached Policies:"
+    iam_client = get_client('iam')
+    roles = iam_client.list_roles()['Roles']
+    user_data = []
+
+    policy_roles = {}
+    for role in roles:
+        attached_policies = iam_client.list_attached_role_policies(RoleName=role['RoleName'])
+        for policy in attached_policies['AttachedPolicies']:
+            user_data.append([role['RoleName'], policy['PolicyName']])
+
+    json_body["iam"] = user_data
+
+    if not user_data:
+        print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
+        return
+    
+    print(crayons.green("[+] " + started, bold=True))
+    print(tabulate(user_data, headers=['Role Name', 'Attached Policies'], tablefmt='psql'))
+
+def list_customer_managed_policies():
+    started = "List Customer Managed Policies:"
+    iam_client = get_client('iam')
+    user_data = []
+
+    response = iam_client.list_policies(Scope='Local')
+    policies = response['Policies']
+
+    for policy in policies:
+        if policy['IsAttachable']:
+            user_data.append([policy['PolicyName'], policy['Arn']])
+
+    json_body["customer_managed_policies"] = user_data
+
+    if not user_data:
+        print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
+        return
+
+    print(crayons.green("[+] " + started, bold=True), "\r\n",
+          tabulate(user_data, headers=['Policy Name', 'ARN'], tablefmt='psql'))
+
 
 def list_sns_topics():
     started = "List SNS topics:"
@@ -384,7 +496,16 @@ def describe_elasticbeanstalk_applications():
         response = elasticbeanstalk_client.describe_applications()
         applications = response['Applications']
         for application in applications:
-            application_data.append([application['ApplicationName'], application['DateCreated'], region])
+            application_name = application['ApplicationName']
+            date_created = application['DateCreated']
+            
+            response = elasticbeanstalk_client.describe_environments(ApplicationName=application_name)
+            environments = response['Environments']
+            
+            for env in environments:
+                environment_name = env['EnvironmentName']
+                environment_url = env.get('CNAME', 'N/A')
+                application_data.append([application_name, date_created, region, environment_name, environment_url])
 
     processes = []
     with ThreadPoolExecutor(max_workers=Thread_Count) as executor:
@@ -396,7 +517,9 @@ def describe_elasticbeanstalk_applications():
         return
 
     print(crayons.green("[+] " + started, bold=True), "\r\n",
-          tabulate(application_data, headers=['Application Name', 'Date Created', 'Region'], tablefmt='psql'))
+          tabulate(application_data, headers=['Application Name', 'Date Created', 'Region', 'Environment Name', 'Environment URL'], tablefmt='psql'))
+
+
     
 
 def list_route53_hosted_zones():
@@ -701,7 +824,7 @@ def list_apigateway_apis():
         response = apigateway_client.get_rest_apis()
         apis = response['items']
         for api in apis:
-            api_data.append([api['name'], api['description'], region])
+            api_data.append([api['name'], region])
 
     processes = []
     with ThreadPoolExecutor(max_workers=Thread_Count) as executor:
@@ -715,7 +838,71 @@ def list_apigateway_apis():
         return
 
     print(crayons.green("[+] " + started, bold=True), "\r\n",
-          tabulate(api_data, headers=['API Name', 'Description', 'Region'], tablefmt='psql'))
+          tabulate(api_data, headers=['API Name', 'Region'], tablefmt='psql'))
+
+
+
+def list_apigateway_apis123():
+    started = "List API Gateway APIs:"
+    api_data = []
+
+    def get_rest_apis(region):
+        apigateway_client = get_client('apigateway', region_name=region)
+        response = apigateway_client.get_rest_apis()
+        apis = response['items']
+        for api in apis:
+            endpoint_configuration = apigateway_client.get_rest_api(
+                restApiId=api['id']
+            )['endpointConfiguration']
+            api_type = "Private" if endpoint_configuration['types'] == ['PRIVATE'] else "Public"
+            api_data.append([api['name'], api_type, region])
+
+    processes = []
+    with ThreadPoolExecutor(max_workers=Thread_Count) as executor:
+        for region in regions:
+            processes.append(executor.submit(get_rest_apis, region))
+
+    json_body["apigateway"] = api_data
+
+    if not api_data:
+        print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
+        return
+
+    print(crayons.green("[+] " + started, bold=True), "\r\n",
+          tabulate(api_data, headers=['API Name', 'Type', 'Region'], tablefmt='psql'))
+
+
+def list_ecs_clusters():
+    started = "List ECS Clusters:"
+    ecs_data = []
+
+    def get_ecs_clusters(region):
+        ecs_client = get_client('ecs', region_name=region)
+        response = ecs_client.list_clusters()
+        clusters = response['clusterArns']
+        if not clusters:
+            return
+
+        for cluster_arn in clusters:
+            cluster_name = cluster_arn.split('/')[-1]
+            ecs_data.append([cluster_name, region])
+
+    processes = []
+    with ThreadPoolExecutor(max_workers=Thread_Count) as executor:
+        for region in regions:
+            processes.append(executor.submit(get_ecs_clusters, region))
+
+    json_body["ecs_clusters"] = ecs_data
+
+    # Check if ecs_data is empty
+    if not any(ecs_data):
+        print(crayons.yellow("[!] " + started + " (Empty!)", bold=True))
+        return
+
+    print(crayons.green("[+] " + started, bold=True))
+    print(tabulate(ecs_data, headers=['Cluster Name', 'Region'], tablefmt='psql'))
+
+
 
 
 def list_cloudformation_stacks():
@@ -1461,17 +1648,19 @@ def describe_snapshots():
         ec2_client = get_client('ec2', region_name=region)
         response = ec2_client.describe_snapshots(OwnerIds=['self'])
         snapshots = response['Snapshots']
-
         for snapshot in snapshots:
             snapshot_data.append([
                 snapshot['SnapshotId'],
                 snapshot['VolumeId'],
                 snapshot['StartTime'],
                 snapshot['State'],
+                'Public' if snapshot.get('Encrypted') is False else 'Private',  # Check if snapshot is encrypted
                 region
             ])
 
     processes = []
+    ec2_client = boto3.client('ec2')
+    regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
     with ThreadPoolExecutor(max_workers=Thread_Count) as executor:
         for region in regions:
             processes.append(executor.submit(describe_snapshots_in_region, region))
@@ -1481,7 +1670,37 @@ def describe_snapshots():
         return
 
     print(crayons.green("[+] " + started, bold=True))
-    print(tabulate(snapshot_data, headers=['Snapshot ID', 'Volume ID', 'Start Time', 'State', 'Region'], tablefmt='psql'))
+    print(tabulate(snapshot_data, headers=['Snapshot ID', 'Volume ID', 'Start Time', 'State', 'Public/Private', 'Region'], tablefmt='psql'))
+
+
+def describe_serverless_apps():
+    app_data = []
+    started = "List Serverless Application:"
+    # Initialize SAR client
+    sar_client = boto3.client('serverlessrepo', region_name="us-east-1")
+
+    # List applications
+    response = sar_client.list_applications()
+
+    # Extract application data
+    for app in response['Applications']:
+        app_data.append([
+            app['Name'],
+            app['Author'],
+            app['Description'],
+            app['CreationTime']
+        ])
+
+    # Display application data in table format
+    headers = ["Name", "Author", "Description", "Creation Time"]
+    print(crayons.green("[+] " + started, bold=True))
+    if not app_data:
+        print(crayons.yelow("[!] " + started + " (Empty!)", bold=True))
+    else:
+        print(tabulate(app_data, headers=headers, tablefmt='psql'))
+
+
+
 
 
 def describe_subnets():
@@ -1609,25 +1828,26 @@ def describe_security_groups():
 
 
 services_list = {
-  "ec2": "describe_ec2_instances","vpc":"describe_vpcs","s3": "list_s3_buckets","rds": "describe_rds_instances","lambda": "list_lambda_functions","cloudfront": "list_cloudfront_distributions","dynamodb": "list_dynamodb_tables","iam": "list_iam_users","sns": "list_sns_topics",
+  "ec2": "describe_ec2_instances","vpc":"describe_vpcs","s3": "list_s3_buckets","rds": "describe_rds_instances","lambda": "list_lambda_functions","cloudfront": "list_cloudfront_distributions","dynamodb": "list_dynamodb_tables","iam": "list_iam_users","iam": "list_iam_users_group", "iam": "list_iam_users_roles","iam": "list_customer_managed_policies","sns": "list_sns_topics",
   "sqs": "list_sqs_queues","ecr": "describe_ecr_repositories","elasticbeanstalk": "describe_elasticbeanstalk_applications","route53": "list_route53_hosted_zones","cloudwatch": "describe_cloudwatch_alarms","codepipeline": "list_codepipeline_pipelines","sagemaker": "list_sagemaker_notebooks",
   "secretsmanager": "list_secretsmanager_secrets","glue": "list_glue_data_catalogs","stepfunctions": "list_stepfunctions_state_machines","eks": "list_eks_clusters","cloudtrail": "describe_cloudtrail_trails","kinesis": "list_kinesis_streams","redshift": "describe_redshift_clusters",
-  "elasticache": "describe_elasticache_clusters","apigateway": "list_apigateway_apis","cloudformation": "list_cloudformation_stacks","appsync": "list_appsync_apis","ssm": "list_ssm_documents","elastictranscoder": "list_elastictranscoder_pipelines","datapipeline": "list_datapipeline_pipelines",
+  "elasticache": "describe_elasticache_clusters","apigateway": "list_apigateway_apis", "ecs": "list_ecs_clusters","cloudformation": "list_cloudformation_stacks","appsync": "list_appsync_apis","ssm": "list_ssm_documents","elastictranscoder": "list_elastictranscoder_pipelines","datapipeline": "list_datapipeline_pipelines",
   "mediaconvert": "list_mediaconvert_jobs","storagegateway": "list_storagegateway_gateways","workspaces": "describe_workspaces","cloud9": "list_cloud9_environments","lex-models": "list_lex_bots","iot": "list_iot_things","medialive": "list_medialive_channels","datasync": "list_datasync_tasks",
   "emr": "list_emr_clusters","athena": "list_athena_workgroups","pinpoint": "list_pinpoint_applications","efs": "list_efs_file_systems","mediapackage": "list_mediapackage_channels","mq": "list_mq_brokers","organizations": "list_organizations_accounts","detective": "list_detective_graphs",
   "opsworks": "list_opsworks_stacks","codecommit": "list_codecommit_repositories","appmesh": "list_appmesh_meshes","backup": "list_backup_plans","mediapackage-vod": "list_mediapackage_vod_assets","mediastore": "list_mediastore_containers","Snapshots":"describe_snapshots","Subnet":"describe_subnets",
-  "Volumes":"describe_volumes","ami":"describe_amis","SecurityGroups":"describe_security_groups"
+  "Volumes":"describe_volumes","ami":"describe_amis","SecurityGroups":"describe_security_groups", "serverlessrepo": "describe_serverless_apps"
 }
 
 
 functions = [
-    describe_ec2_instances,describe_vpcs,list_s3_buckets,describe_rds_instances,list_lambda_functions,list_cloudfront_distributions,list_dynamodb_tables,list_iam_users,list_sns_topics,list_sqs_queues,describe_ecr_repositories,describe_elasticbeanstalk_applications,list_route53_hosted_zones,
+    describe_ec2_instances,describe_vpcs,list_s3_buckets,describe_rds_instances,list_lambda_functions,list_cloudfront_distributions,list_dynamodb_tables,list_iam_users,list_iam_users_group,list_iam_users_roles,list_customer_managed_policies,list_sns_topics,list_sqs_queues,describe_ecr_repositories,describe_elasticbeanstalk_applications,list_route53_hosted_zones,
     describe_cloudwatch_alarms,list_codepipeline_pipelines,list_sagemaker_notebooks,list_secretsmanager_secrets,list_glue_data_catalogs,list_stepfunctions_state_machines,list_eks_clusters,describe_cloudtrail_trails,list_kinesis_streams,describe_redshift_clusters,
-    describe_elasticache_clusters,list_apigateway_apis,list_cloudformation_stacks,list_appsync_apis,list_ssm_documents,list_elastictranscoder_pipelines,list_datapipeline_pipelines,list_mediaconvert_jobs,list_storagegateway_gateways,describe_workspaces,list_cloud9_environments,
+    describe_elasticache_clusters,list_apigateway_apis, list_ecs_clusters, list_cloudformation_stacks,list_appsync_apis,list_ssm_documents,list_elastictranscoder_pipelines,list_datapipeline_pipelines,list_mediaconvert_jobs,list_storagegateway_gateways,describe_workspaces,list_cloud9_environments,
     list_lex_bots,list_iot_things,list_medialive_channels,list_datasync_tasks,list_emr_clusters,list_athena_workgroups,list_pinpoint_applications,list_efs_file_systems,list_glue_crawlers,list_datasync_locations,list_mediapackage_channels,list_mq_brokers,list_organizations_accounts,
     list_detective_graphs,list_opsworks_stacks,list_codecommit_repositories,list_cloudformation_change_sets,list_appmesh_meshes,list_backup_plans,list_mediapackage_vod_assets,list_mediastore_containers,describe_snapshots,
-    describe_subnets,describe_volumes,describe_amis,describe_security_groups
+    describe_subnets,describe_volumes,describe_amis,describe_security_groups, describe_serverless_apps
 ]
+
 
 
 
